@@ -9,7 +9,7 @@ import tensorflow as tf
 from tqdm import tqdm
 import numpy as np
 
-from basic.evaluator import ForwardEvaluator, MultiGPUF1Evaluator
+from basic.evaluator_nqa import ForwardEvaluator, MultiGPUF1Evaluator,BleuEvaluator
 from basic.graph_handler import GraphHandler
 from basic.model_nqa import get_multi_gpu_models
 from basic.trainer import MultiGPUTrainer
@@ -53,7 +53,7 @@ def set_dirs(config):
 
 
 def _config_debug(config):
-    if config.debug:
+    if config.debug: # Scale down params if debug mode ON
         config.num_steps = 2
         config.eval_period = 1
         config.log_period = 1
@@ -76,7 +76,7 @@ def _train(config):
     emb_mat = np.array([idx2vec_dict[idx] if idx in idx2vec_dict
                         else np.random.multivariate_normal(np.zeros(config.word_emb_size), np.eye(config.word_emb_size))
                         for idx in range(config.word_vocab_size)])
-    config.emb_mat = emb_mat
+    config.emb_mat = emb_mat # INITIALIZE EMB MAT IN CONFIG
 
     # construct model graph and variables (using default graph)
     pprint(config.__flags, indent=2)
@@ -85,7 +85,9 @@ def _train(config):
     print("num params: {}".format(get_num_params()))
     #return
     trainer = MultiGPUTrainer(config, models)
-    evaluator = MultiGPUF1Evaluator(config, models, tensor_dict=model.tensor_dict if config.vis else None)
+    #evaluator = MultiGPUF1Evaluator(config, models, tensor_dict=model.tensor_dict if config.vis else None) # FIXME: Put this back!
+    #BLEU evaluator
+    evaluator = BleuEvaluator(config, model, tensor_dict = model.tensor_dict if config.vis else None)
     graph_handler = GraphHandler(config, model)  # controls all tensors and variables in the graph, including loading /saving
 
     # Variables
@@ -97,11 +99,15 @@ def _train(config):
     global_step = 0
     for batches in tqdm(train_data.get_multi_batches(config.batch_size, config.num_gpus,
                                                      num_steps=num_steps, shuffle=True, cluster=config.cluster), total=num_steps):
+        # batches and models should be of the same length
         global_step = sess.run(model.global_step) + 1  # +1 because all calculations are done after step
         get_summary = global_step % config.log_period == 0
+        print("TRAINER STEP STARTS!")
         loss, summary, train_op = trainer.step(sess, batches, get_summary=get_summary)
+        print("TRAINER STEP DONE!")
+        print("BATCH TRAIN LOSS:", loss)
         if get_summary:
-            graph_handler.add_summary(summary, global_step)
+           graph_handler.add_summary(summary, global_step)
 
         # occasional saving
         if global_step % config.save_period == 0:
@@ -111,21 +117,22 @@ def _train(config):
             continue
         # Occasional evaluation
         if global_step % config.eval_period == 0:
-            num_steps = math.ceil(dev_data.num_examples / (config.batch_size * config.num_gpus))
-            if 0 < config.val_num_batches < num_steps:
-                num_steps = config.val_num_batches
-            e_train = evaluator.get_evaluation_from_batches(
-                sess, tqdm(train_data.get_multi_batches(config.batch_size, config.num_gpus, num_steps=num_steps), total=num_steps)
-            )
-            graph_handler.add_summaries(e_train.summaries, global_step)
-            e_dev = evaluator.get_evaluation_from_batches(
-                sess, tqdm(dev_data.get_multi_batches(config.batch_size, config.num_gpus, num_steps=num_steps), total=num_steps))
-            graph_handler.add_summaries(e_dev.summaries, global_step)
+             num_steps = math.ceil(dev_data.num_examples / (config.batch_size * config.num_gpus))
+             if 0 < config.val_num_batches < num_steps:
+                 num_steps = config.val_num_batches
+             e_train = evaluator.get_evaluation_from_batches(
+                 sess, tqdm(train_data.get_multi_batches(config.batch_size, config.num_gpus, num_steps=num_steps), total=num_steps)
+             )
+             graph_handler.add_summaries(e_train.summaries, global_step)
+             e_dev = evaluator.get_evaluation_from_batches(
+                 sess, tqdm(dev_data.get_multi_batches(config.batch_size, config.num_gpus, num_steps=num_steps), total=num_steps))
+             graph_handler.add_summaries(e_dev.summaries, global_step)
 
-            if config.dump_eval:
-                graph_handler.dump_eval(e_dev)
-            if config.dump_answer:
-                graph_handler.dump_answer(e_dev)
+             if config.dump_eval:
+                 graph_handler.dump_eval(e_dev)
+             if config.dump_answer:
+                 graph_handler.dump_answer(e_dev)
+
     if global_step % config.save_period != 0:
         graph_handler.save(sess, global_step=global_step)
 
@@ -135,18 +142,21 @@ def _test(config):
     update_config(config, [test_data])
 
     _config_debug(config)
-
+    '''
     if config.use_glove_for_unk:
         word2vec_dict = test_data.shared['lower_word2vec'] if config.lower_word else test_data.shared['word2vec']
         new_word2idx_dict = test_data.shared['new_word2idx']
         idx2vec_dict = {idx: word2vec_dict[word] for word, idx in new_word2idx_dict.items()}
         new_emb_mat = np.array([idx2vec_dict[idx] for idx in range(len(idx2vec_dict))], dtype='float32')
         config.new_emb_mat = new_emb_mat
+    '''
 
     pprint(config.__flags, indent=2)
     models = get_multi_gpu_models(config)
     model = models[0]
-    evaluator = MultiGPUF1Evaluator(config, models, tensor_dict=models[0].tensor_dict if config.vis else None)
+    #evaluator = MultiGPUF1Evaluator(config, models, tensor_dict=models[0].tensor_dict if config.vis else None)
+    #BLEU evaluator
+    evaluator = BleuEvaluator(config, model, tensor_dict = model.tensor_dict if config.vis else None)
     graph_handler = GraphHandler(config, model)
 
     sess = tf.Session(config=tf.ConfigProto(allow_soft_placement=True))
@@ -181,13 +191,14 @@ def _forward(config):
     update_config(config, [test_data])
 
     _config_debug(config)
-
+    '''
     if config.use_glove_for_unk:
         word2vec_dict = test_data.shared['lower_word2vec'] if config.lower_word else test_data.shared['word2vec']
         new_word2idx_dict = test_data.shared['new_word2idx']
         idx2vec_dict = {idx: word2vec_dict[word] for word, idx in new_word2idx_dict.items()}
         new_emb_mat = np.array([idx2vec_dict[idx] for idx in range(len(idx2vec_dict))], dtype='float32')
         config.new_emb_mat = new_emb_mat
+    '''
 
     pprint(config.__flags, indent=2)
     models = get_multi_gpu_models(config)
